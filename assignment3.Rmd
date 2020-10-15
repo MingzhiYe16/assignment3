@@ -1,0 +1,236 @@
+---
+title: "PM566lab3"
+author: "Mingzhi Ye"
+date: "10/7/2020"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r,include=FALSE}
+library(data.table)
+library(leaflet)
+library(tidyverse)
+library(lubridate)
+library(httr)
+library(data.table)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidytext)
+library(xml2)
+```
+
+##APIs
+
+#number of papers
+
+```{r counter-pubmed, eval=TRUE}
+# Downloading the website
+website <- xml2::read_html("https://pubmed.ncbi.nlm.nih.gov/?term=sars-cov-2+trial+vaccine")
+
+# Finding the counts
+counts <- xml2::xml_find_first(website, "/html/body/main/div[9]/div[2]/div[2]/div[1]/span
+")
+
+# Turning it into text
+counts <- as.character(counts)
+
+# Extracting the data using regex
+stringr::str_extract(counts, "[0-9,]+")
+```
+There are 560 articles related to "sars-cov2 trial vaccine"
+
+#retrieve the id and abstract
+
+The abstract data are stored in publications_txt as character vector
+```{r}
+query_ids <- GET(
+  url   = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+  query = list(
+    db= "pubmed",
+    term = "sars-cov-2 trial vaccine",
+    retmax= 1000)
+)
+
+ids <- httr::content(query_ids)
+ids <- as.character(ids)
+
+ids <- stringr::str_extract_all(ids, "<Id>[1-9]+</Id>")[[1]]
+
+
+ids <- stringr::str_remove_all(ids, "<Id>")
+ids <- stringr::str_remove_all(ids, "</Id>")
+ids<-head(ids,250)
+
+publications <- GET(
+  url   = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+  query = list(
+    db = "pubmed",
+    id = paste(ids, collapse = ","),
+    retmax = 1000,
+    rettype = "abstract"
+    )
+)
+
+
+publications <- httr::content(publications)
+publications_txt <- as.character(publications)
+
+
+```
+
+#create a dataset
+
+```{r}
+
+pub_char_list<-xml_children(publications)
+
+pub_char_list<-sapply(pub_char_list, as.character)
+
+#extract titles
+titles <- str_extract(pub_char_list, "<ArticleTitle>(\\n|.)+</ArticleTitle>")
+titles <- str_remove_all(titles, "</?[[:alnum:]]+>")
+titles <- str_replace_all(titles, "\\s+"," ")
+
+#extract journals' names
+journal <- str_extract(pub_char_list, "<Title>(\\n|.)+</Title>")
+journal <- str_remove_all(journal, "</?[[:alnum:]]+>")
+journal <- str_replace_all(journal, "\\s+"," ")
+
+#extract publish date
+pubdate <- str_extract(pub_char_list, "<PubDate>(\\n|.)+</PubDate>")
+pubdate <- str_remove_all(pubdate, "</?[[:alnum:]]+>")
+pubdate <- str_replace_all(pubdate,"\\s+"," ")
+
+#extract abstracts
+abstract <- str_extract(pub_char_list, "<Abstract>(\\n|.)+</Abstract>")
+abstract <- str_remove_all(abstract, "</?[[:alnum:]]+>")
+abstract <- str_replace_all(abstract, "\\s+"," ")
+
+
+dataset_lab7 <- data.frame(
+  PubMedID  = ids,
+  Journal_name   = journal,
+  Publish_Date   = pubdate,
+  Title     = titles,
+  Abstract  = abstract
+)
+
+
+head(dataset_lab7)
+```
+
+C:\Users\yemin\Desktop\PM566\week9\pubmed.txt
+
+
+
+##Text Mining
+
+
+#count the number of each token
+If we dpn't remove the stop words, the most frequent words are meaningless. 
+
+removing stop words change what tokens appear as the most frequent significantly.
+
+the 5 most common tokens for each search term after removing stopwords are displayed in the third table
+
+```{r}
+pubmed<-read.csv("C:/Users/yemin/Desktop/PM566/week9/pubmed.csv")
+pubmed %>%
+  unnest_tokens(token, abstract) %>%
+  count(token, sort = TRUE) %>%
+  top_n(n=5,wt=n)
+pubmed %>%
+  unnest_tokens(token, abstract) %>%
+  anti_join(stop_words, by = c("token" = "word")) %>%
+  count(token, sort = TRUE) %>%
+  top_n(n=5,wt=n)
+pubmed %>%
+  unnest_tokens(token, abstract) %>%
+  anti_join(stop_words, by = c("token" = "word")) %>%
+  group_by(term) %>%
+  count(token) %>%
+  arrange(-n) %>%
+  top_n(n=5,wt=n) %>%
+  arrange(term,-n)
+```
+
+#Tokenize the abstracts into bigrams
+
+```{r}
+pubmed %>%
+  unnest_ngrams(ngram, abstract, n = 2) %>%
+  count(ngram, sort = TRUE) %>%
+  top_n(10, n) %>%
+  ggplot(aes(x = n, y = fct_reorder(ngram, n)))+
+  geom_col()
+```
+
+#Calculate the TF-IDF  values
+
+I displayed the 5 tokens from each search term with the highest TF-IDF value in the table.
+
+The results are significantly different from the answers in question 1, since the resulted tokens tended to be particularly frequent in that specific term
+```{r}
+#calculate the number of all tokens in a term
+nalltokens<-pubmed %>%
+  unnest_tokens(token, abstract) %>%
+  anti_join(stop_words, by = c("token" = "word")) %>%
+  group_by(term) %>%
+  count(term, sort = TRUE)
+#calculate the number of the specific token in a term
+ninterm<-pubmed %>%
+  unnest_tokens(token, abstract) %>%
+  anti_join(stop_words, by = c("token" = "word")) %>%
+  group_by(term) %>%
+  count(token, sort = TRUE)
+#calculate how much terms does a specific token exist in
+nindifferentterm <- ninterm %>%
+  group_by(token) %>%
+  count(token, sort = TRUE)
+#merge, and calculate TF
+tfidf0<-merge(
+  x=nalltokens,
+  y=ninterm,
+  by="term",
+  all.x=TRUE,
+  all.y=TRUE
+)
+tfidf<-tfidf0 %>%
+  rename(n_alltokens=n.x,
+         n_in_term=n.y)
+tfidf<-tfidf %>%
+  mutate(tf=n_in_term/n_alltokens) 
+# merge and calculate TFIDF
+tfidf<-merge(
+  x=tfidf,
+  y=nindifferentterm,
+  by="token",
+  all.x=TRUE,
+  all.y=TRUE
+)
+tfidf<-tfidf %>%
+  rename(n_document_in=n) %>%
+  mutate(TFIDF=tf*log10(5/(1+n_document_in)))
+tfidf %>%
+  group_by(term) %>%
+  
+  arrange(-TFIDF) %>%
+  slice(1:5) %>%
+  arrange(term,-TFIDF)
+
+```
+
+
+
+
+
+
+
+
+
